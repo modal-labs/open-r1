@@ -19,7 +19,7 @@ import abc
 import asyncio
 from typing import List, Optional
 
-from ..utils import is_e2b_available, is_morph_available
+from ..utils import is_e2b_available, is_modal_available, is_morph_available
 
 
 if is_e2b_available():
@@ -41,6 +41,17 @@ else:
     MorphCloudClient = None
     Sandbox = None
     RoutedMorphSandbox = None
+
+
+if is_modal_available():
+    from modal import App
+    from modal import Sandbox as ModalSandbox
+
+    from .routed_modal import RoutedModalSandbox
+else:
+    App = None
+    ModalSandbox = None
+    RoutedModalSandbox = None
 
 
 class CodeExecutionProvider(abc.ABC):
@@ -336,11 +347,175 @@ class MorphProvider(CodeExecutionProvider):
                         pass
 
 
+class ModalProvider(CodeExecutionProvider):
+    """Provider that executes code using Modal sandboxes."""
+
+    def __init__(self, num_parallel: int = 2, modal_router_url: Optional[str] = None):
+        """Initialize the Modal provider.
+
+        Args:
+            num_parallel: Number of parallel executions to use
+            modal_router_url: URL for the Modal router (if using router mode)
+        """
+        if not is_modal_available():
+            raise ImportError(
+                "Modal is not available and required for this provider. Please install Modal with "
+                "`pip install modal` and authenticate with `modal setup`."
+            )
+
+        self.num_parallel = num_parallel
+        self.modal_router_url = modal_router_url
+
+        self.app = App.lookup("code-interpreter", create_if_missing=True)
+
+    def execute_scripts(self, scripts: List[str], languages: List[str]) -> List[float]:
+        """Execute scripts using Modal sandboxes.
+
+        If modal_router_url is provided, uses the RoutedModalSandbox for batch processing.
+        Otherwise, uses direct Modal sandbox execution with parallelization.
+        """
+        if self.modal_router_url is not None:
+            routed_sandbox = RoutedModalSandbox(router_url=self.modal_router_url)
+
+            try:
+                results = routed_sandbox.run_code(
+                    scripts=scripts,
+                    languages=languages,
+                    timeout=90,
+                    request_timeout=96,
+                )
+
+                rewards = []
+                for result in results:
+                    try:
+                        reward = float(result.text)
+                        rewards.append(reward)
+                    except (ValueError, KeyError, TypeError):
+                        rewards.append(0.0)
+                return rewards
+            except Exception as e:
+                print(f"Error from Modal router: {e}")
+                return [0.0] * len(scripts)
+
+        try:
+            rewards = asyncio.run(self._run_async(scripts, languages, self.num_parallel))
+        except Exception as e:
+            print(f"Error from Modal executor: {e}")
+            rewards = [0.0] * len(scripts)
+
+        return rewards
+
+    async def _run_async(self, scripts: List[str], languages: List[str], num_parallel: int) -> List[float]:
+        """Run multiple scripts concurrently with limited parallelism.
+
+        Args:
+            scripts: List of scripts to execute
+            languages: List of languages of the scripts
+            num_parallel: Maximum number of concurrent executions
+
+        Returns:
+            List of rewards
+        """
+        semaphore = asyncio.Semaphore(num_parallel)
+
+        tasks = [self._run_script(script, language, semaphore) for script, language in zip(scripts, languages)]
+
+        results = await asyncio.gather(*tasks)
+
+        return list(results)
+
+    def _run_script_modal(self, sandbox: Sandbox, script: str, language: str, request_timeout: int) -> str:
+        if language == "python":
+            return sandbox.exec("python", "-c", script, timeout=request_timeout).stdout.read()
+        elif language == "javascript":
+            return sandbox.exec("node", "-e", script, timeout=request_timeout).stdout.read()
+        elif language == "r":
+            return sandbox.exec("R", "-e", script, timeout=request_timeout).stdout.read()
+        elif language == "java":
+            # For Java, we need to create a temporary file and compile/run it
+            temp_file = f"/tmp/temp_{hash(script) % 1000000}.java"
+            sandbox.exec("sh", "-c", f'echo "{script}" > {temp_file}', timeout=request_timeout)
+            class_name = f"Temp{hash(script) % 1000000}"
+            sandbox.exec("javac", temp_file, timeout=request_timeout)
+            return sandbox.exec("java", "-cp", "/tmp", class_name, timeout=request_timeout).stdout.read()
+        elif language == "bash":
+            return sandbox.exec("bash", "-c", script, timeout=request_timeout).stdout.read()
+        elif language == "cpp":
+            # For C++, we need to create a temporary file and compile/run it
+            temp_file = f"/tmp/temp_{hash(script) % 1000000}.cpp"
+            sandbox.exec("sh", "-c", f'echo "{script}" > {temp_file}', timeout=request_timeout)
+            sandbox.exec(
+                "g++",
+                "-o",
+                f"/tmp/temp_{hash(script) % 1000000}",
+                temp_file,
+                timeout=request_timeout,
+            )
+            return sandbox.exec(f"/tmp/temp_{hash(script) % 1000000}", timeout=request_timeout).stdout.read()
+        else:
+            raise ValueError(f"Unsupported language: {language}")
+
+    async def _run_script(self, sandbox: Sandbox, script: str, language: str, semaphore: asyncio.Semaphore) -> float:
+        """Execute a single script in a Modal Sandbox.
+
+        Args:
+            script: The script to execute
+            language: Programming language
+            semaphore: Semaphore to limit concurrency
+
+        Returns:
+            Float reward from script execution
+        """
+        SANDBOX_TIMEOUT = 90
+        MARGIN = 6
+        ASYNCIO_TIMEOUT = SANDBOX_TIMEOUT + MARGIN
+
+        async with semaphore:
+            sandbox = None
+            try:
+                sandbox = await asyncio.to_thread(ModalSandbox.create, app=self.app, timeout=SANDBOX_TIMEOUT)
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(
+                        self._run_script_modal,
+                        sandbox,
+                        script,
+                        language,
+                        SANDBOX_TIMEOUT,
+                    ),
+                    timeout=ASYNCIO_TIMEOUT,
+                )
+
+                lines = []
+                for line in result.stdout:
+                    lines.append(line)
+                if lines:
+                    last_line = lines[-1].strip()
+                    try:
+                        reward = float(last_line)
+                        return reward
+                    except ValueError:
+                        pass
+
+                return 0.0
+
+            except asyncio.TimeoutError:
+                return 0.0
+            except Exception as e:
+                print(f"Error in `_run_script` from Modal sandbox ID {sandbox.object_id} : {e}")
+                return 0.0
+            finally:
+                if sandbox:
+                    try:
+                        await sandbox.terminate()
+                    except Exception as e:
+                        print(f"Error from Modal executor kill with sandbox ID {sandbox.object_id} : {e}")
+
+
 def get_provider(provider_type: str = "e2b", **kwargs) -> CodeExecutionProvider:
     """Factory function to get the appropriate code execution provider.
 
     Args:
-        provider_type: Type of provider to use ("e2b", "morph")
+        provider_type: Type of provider to use ("e2b", "morph", "modal")
         **kwargs: Additional arguments to pass to the provider
 
     Returns:
@@ -361,6 +536,13 @@ def get_provider(provider_type: str = "e2b", **kwargs) -> CodeExecutionProvider:
         return MorphProvider(
             num_parallel=num_parallel,
             morph_router_url=morph_router_url,
+        )
+    elif provider_type == "modal":
+        # Extract Modal-specific arguments
+        modal_router_url = kwargs.pop("modal_router_url", None)
+        return ModalProvider(
+            num_parallel=num_parallel,
+            modal_router_url=modal_router_url,
         )
     else:
         raise ValueError(f"Unknown provider type: {provider_type}")

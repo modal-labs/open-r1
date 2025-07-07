@@ -68,7 +68,8 @@ class ScriptArguments(trl.ScriptArguments):
 
     # Override the dataset_name to make it optional
     dataset_name: Optional[str] = field(
-        default=None, metadata={"help": "Dataset name. Can be omitted if using dataset_mixture."}
+        default=None,
+        metadata={"help": "Dataset name. Can be omitted if using dataset_mixture."},
     )
     dataset_mixture: Optional[dict[str, Any]] = field(
         default=None,
@@ -305,19 +306,24 @@ class GRPOScriptArguments(ScriptArguments):
         metadata={"help": "URL for the MorphCloud router. See scripts/morph_router.py"},
     )
 
+    modal_router_url: Optional[str] = field(
+        default=None,
+        metadata={"help": "URL for the Modal router. See scripts/modal_router.py"},
+    )
+
     code_provider: Optional[str] = field(
         default="e2b",
         metadata={
-            "help": "Provider for code execution. Options: 'e2b', 'local', 'morph'.",
-            "choices": ["e2b", "local", "morph"],
+            "help": "Provider for code execution. Options: 'e2b', 'local', 'morph', 'modal'.",
+            "choices": ["e2b", "local", "morph", "modal"],
         },
     )
 
     ioi_provider: Optional[str] = field(
         default="piston",
         metadata={
-            "help": "Provider for IOI code execution. Options: 'piston', 'morph'.",
-            "choices": ["piston", "morph"],
+            "help": "Provider for IOI code execution. Options: 'piston', 'morph', 'modal'.",
+            "choices": ["piston", "morph", "modal"],
         },
     )
 

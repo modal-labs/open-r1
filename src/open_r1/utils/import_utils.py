@@ -28,3 +28,10 @@ _morph_available = _is_package_available("morphcloud")
 
 def is_morph_available() -> bool:
     return _morph_available
+
+
+_modal_available = _is_package_available("modal")
+
+
+def is_modal_available() -> bool:
+    return _modal_available

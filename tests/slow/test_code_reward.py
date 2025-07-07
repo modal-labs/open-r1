@@ -19,6 +19,7 @@ from datasets import load_dataset
 
 from e2b_code_interpreter.models import Execution, ExecutionError
 from open_r1.rewards import code_reward, ioi_code_reward
+from open_r1.utils.routed_modal import RoutedModalSandbox
 from open_r1.utils.routed_morph import RoutedMorphSandbox
 from open_r1.utils.routed_sandbox import RoutedSandbox
 
@@ -210,6 +211,97 @@ class TestCodeRewards(unittest.TestCase):
         # First one should be okay
         assert results[0].exception_str is None
         assert "this is fine with morph" in results[0].text
+
+        # Second one should have a syntax error
+        assert "SyntaxError" in results[1].text
+
+    def test_python_code_reward_modal(self):
+        # requires Modal, see the README.md file
+        code_dataset = load_dataset("open-r1/verifiable-coding-problems-python_decontaminated-tested-shuffled")
+        NUM_SAMPLES = 20
+        samples = code_dataset["train"].select(range(NUM_SAMPLES))
+        test_completions = [[{"content": sample["gold_standard_solution"]}] for sample in samples]
+        reward_kwargs = {
+            "verification_info": [sample["verification_info"] for sample in samples],
+            "provider_type": "modal",
+        }
+        rewards = code_reward(test_completions, **reward_kwargs)
+        print(rewards)
+        assert rewards == [1.0] * NUM_SAMPLES
+
+    def test_modal_router(self):
+        # run router locally: python scripts/modal_router.py --port 8002 --max_num_sandboxes 20
+        code_dataset = load_dataset("open-r1/verifiable-coding-problems-python_decontaminated-tested-shuffled")
+        NUM_SAMPLES = 32
+        samples = code_dataset["train"].select(range(NUM_SAMPLES))
+        test_completions = [[{"content": sample["gold_standard_solution"]}] for sample in samples]
+        reward_kwargs = {
+            "verification_info": [sample["verification_info"] for sample in samples],
+            "provider_type": "modal",
+            "modal_router_url": "0.0.0.0:8002",
+        }
+        rewards = code_reward(test_completions, **reward_kwargs)
+        print(rewards)
+        assert rewards == [1.0] * NUM_SAMPLES
+
+    def test_modal_router_parallel(self):
+        # run router locally: python scripts/modal_router.py --port 8002 --max_num_sandboxes 20
+        code_dataset = load_dataset("open-r1/verifiable-coding-problems-python_decontaminated-tested-shuffled")
+
+        BATCH_SIZE = 32
+        NUM_SAMPLES = 256
+
+        def batch_code_reward(examples):
+            test_completions = [[{"content": solution}] for solution in examples["gold_standard_solution"]]
+            reward_kwargs = {
+                "verification_info": [verification_info for verification_info in examples["verification_info"]],
+                "provider_type": "modal",
+                "modal_router_url": "0.0.0.0:8002",
+            }
+            rewards = code_reward(test_completions, **reward_kwargs)
+            assert rewards == [1.0] * BATCH_SIZE
+            return examples
+
+        code_dataset = code_dataset["train"].select(range(NUM_SAMPLES))
+        code_dataset = code_dataset.map(
+            batch_code_reward,
+            batched=True,
+            batch_size=BATCH_SIZE,
+            num_proc=4,
+            load_from_cache_file=False,
+        )
+
+    def test_modal_router_run_code_success(self):
+        # run router locally: python scripts/modal_router.py --port 8002 --max_num_sandboxes 20
+
+        routed_sandbox = RoutedModalSandbox(router_url="localhost:8002")
+        scripts = [
+            "print('hello from modal integration test')",
+            "result = 3 + 3\nprint(result)",
+        ]
+        results = routed_sandbox.run_code(
+            scripts=scripts,
+        )
+
+        assert len(results) == 2
+
+        for result in results:
+            assert result.exception_str is None
+            assert "hello" in result.text or "6" in result.text
+
+    def test_modal_router_run_code_with_error(self):
+        # run router locally: python scripts/modal_router.py --port 8002 --max_num_sandboxes 20
+
+        routed_sandbox = RoutedModalSandbox(router_url="localhost:8002")
+        scripts = ["print('this is fine with modal')", "print('unterminated string"]
+
+        results = routed_sandbox.run_code(scripts)
+
+        assert len(results) == 2
+
+        # First one should be okay
+        assert results[0].exception_str is None
+        assert "this is fine with modal" in results[0].text
 
         # Second one should have a syntax error
         assert "SyntaxError" in results[1].text
