@@ -17,6 +17,8 @@
 
 import abc
 import asyncio
+import uuid
+from textwrap import dedent
 from typing import List, Optional
 
 from ..utils import is_e2b_available, is_modal_available, is_morph_available
@@ -44,6 +46,7 @@ else:
 
 
 if is_modal_available():
+    import modal
     from modal import App
     from modal import Sandbox as ModalSandbox
 
@@ -51,7 +54,7 @@ if is_modal_available():
 else:
     App = None
     ModalSandbox = None
-    RoutedModalSandbox = None
+    modal = None
 
 
 class CodeExecutionProvider(abc.ABC):
@@ -292,7 +295,7 @@ class MorphProvider(CodeExecutionProvider):
         Returns:
             Float reward from script execution
         """
-        SANDBOX_TIMEOUT = 90
+        SANDBOX_TIMEOUT = 30
         MARGIN = 6
         ASYNCIO_TIMEOUT = SANDBOX_TIMEOUT + MARGIN
 
@@ -381,8 +384,8 @@ class ModalProvider(CodeExecutionProvider):
                 results = routed_sandbox.run_code(
                     scripts=scripts,
                     languages=languages,
-                    timeout=90,
-                    request_timeout=96,
+                    timeout=30,
+                    request_timeout=36,
                 )
 
                 rewards = []
@@ -425,37 +428,17 @@ class ModalProvider(CodeExecutionProvider):
         return list(results)
 
     def _run_script_modal(self, sandbox: Sandbox, script: str, language: str, request_timeout: int) -> str:
+        script = dedent(script)
         if language == "python":
-            return sandbox.exec("python", "-c", script, timeout=request_timeout).stdout.read()
-        elif language == "javascript":
-            return sandbox.exec("node", "-e", script, timeout=request_timeout).stdout.read()
-        elif language == "r":
-            return sandbox.exec("R", "-e", script, timeout=request_timeout).stdout.read()
-        elif language == "java":
-            # For Java, we need to create a temporary file and compile/run it
-            temp_file = f"/tmp/temp_{hash(script) % 1000000}.java"
-            sandbox.exec("sh", "-c", f'echo "{script}" > {temp_file}', timeout=request_timeout)
-            class_name = f"Temp{hash(script) % 1000000}"
-            sandbox.exec("javac", temp_file, timeout=request_timeout)
-            return sandbox.exec("java", "-cp", "/tmp", class_name, timeout=request_timeout).stdout.read()
-        elif language == "bash":
-            return sandbox.exec("bash", "-c", script, timeout=request_timeout).stdout.read()
-        elif language == "cpp":
-            # For C++, we need to create a temporary file and compile/run it
-            temp_file = f"/tmp/temp_{hash(script) % 1000000}.cpp"
-            sandbox.exec("sh", "-c", f'echo "{script}" > {temp_file}', timeout=request_timeout)
-            sandbox.exec(
-                "g++",
-                "-o",
-                f"/tmp/temp_{hash(script) % 1000000}",
-                temp_file,
-                timeout=request_timeout,
-            )
-            return sandbox.exec(f"/tmp/temp_{hash(script) % 1000000}", timeout=request_timeout).stdout.read()
+            tmp_file = f"/tmp/{uuid.uuid4()}.py"
+            with sandbox.open(tmp_file, "w") as f:
+                f.write(script)
+                p = sandbox.exec("python", tmp_file, timeout=request_timeout)
+                return p.wait()
         else:
             raise ValueError(f"Unsupported language: {language}")
 
-    async def _run_script(self, sandbox: Sandbox, script: str, language: str, semaphore: asyncio.Semaphore) -> float:
+    async def _run_script(self, script: str, language: str, semaphore: asyncio.Semaphore) -> float:
         """Execute a single script in a Modal Sandbox.
 
         Args:
@@ -466,14 +449,18 @@ class ModalProvider(CodeExecutionProvider):
         Returns:
             Float reward from script execution
         """
-        SANDBOX_TIMEOUT = 90
+        SANDBOX_TIMEOUT = 30
         MARGIN = 6
         ASYNCIO_TIMEOUT = SANDBOX_TIMEOUT + MARGIN
 
         async with semaphore:
-            sandbox = None
             try:
-                sandbox = await asyncio.to_thread(ModalSandbox.create, app=self.app, timeout=SANDBOX_TIMEOUT)
+                sandbox = await asyncio.to_thread(
+                    ModalSandbox.create,
+                    app=self.app,
+                    timeout=SANDBOX_TIMEOUT,
+                    verbose=True,
+                )
                 result = await asyncio.wait_for(
                     asyncio.to_thread(
                         self._run_script_modal,
@@ -485,18 +472,11 @@ class ModalProvider(CodeExecutionProvider):
                     timeout=ASYNCIO_TIMEOUT,
                 )
 
-                lines = []
-                for line in result.stdout:
-                    lines.append(line)
-                if lines:
-                    last_line = lines[-1].strip()
-                    try:
-                        reward = float(last_line)
-                        return reward
-                    except ValueError:
-                        pass
-
-                return 0.0
+                try:
+                    reward = float(result)
+                    return reward
+                except ValueError:
+                    return 0.0
 
             except asyncio.TimeoutError:
                 return 0.0
@@ -504,11 +484,7 @@ class ModalProvider(CodeExecutionProvider):
                 print(f"Error in `_run_script` from Modal sandbox ID {sandbox.object_id} : {e}")
                 return 0.0
             finally:
-                if sandbox:
-                    try:
-                        await sandbox.terminate()
-                    except Exception as e:
-                        print(f"Error from Modal executor kill with sandbox ID {sandbox.object_id} : {e}")
+                sandbox.terminate()
 
 
 def get_provider(provider_type: str = "e2b", **kwargs) -> CodeExecutionProvider:

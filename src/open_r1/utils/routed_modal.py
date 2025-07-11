@@ -85,7 +85,13 @@ class RoutedModalSandbox:
 
                 results = []
                 for _ in scripts:
-                    results.append(type("obj", (object,), {"text": None, "exception_str": error}))
+                    results.append(
+                        type(
+                            "obj",
+                            (object,),
+                            {"text": None, "exception_str": error, "stdout": None},
+                        )
+                    )
                 return results
 
             response_data = response.json()
@@ -98,6 +104,7 @@ class RoutedModalSandbox:
                     {
                         "text": item.get("text"),
                         "exception_str": item.get("exception_str"),
+                        "stdout": item.get("stdout"),
                     },
                 )
                 results.append(result)
@@ -110,5 +117,11 @@ class RoutedModalSandbox:
 
             results = []
             for _ in scripts:
-                results.append(type("obj", (object,), {"text": None, "exception_str": error}))
+                results.append(
+                    type(
+                        "obj",
+                        (object,),
+                        {"text": None, "exception_str": error, "stdout": None},
+                    )
+                )
             return results

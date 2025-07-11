@@ -308,7 +308,7 @@ Make sure your dataset contains a `verification_info` column with the following 
 
 ```python
 {
-    "language": "python",  # Morph/Modal support more languages including C++, Java, etc.
+    "language": "python",  # Morph supports more languages including C++, Java, etc.
     "test_cases": [
         {
             "input": "4\n4\n0001\n1000\n0011\n0111\n3\n010\n101\n0\n2\n00000\n00001\n4\n01\n001\n0001\n00001\n",
