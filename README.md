@@ -317,6 +317,7 @@ Make sure your dataset contains a `verification_info` column with the following 
         }
     ],
 }
+```
 
 For example, to train a smol model on Python problems, start the vLLM server:
 
